@@ -135,18 +135,7 @@ Parameters:
     Type: String
     Default: arn:aws:sns:us-east-1:224233068863:sh-topic
 
-  pOrgId:
-    Description: Organization Id found in AWS Organizations console
-    Type: String
-    Default: o-j00zam5ytf
 
-  pExceptionTag:
-    Description: Exception tag for EC2
-    Type: String
-    Default: true
-    AllowedValues:
-    - true
-    - false
 
   # pS3Bucket:
   #   Description: S3 bucket
