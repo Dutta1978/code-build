@@ -1,0 +1,23 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - pip install awscli
+  build:
+    commands:
+      - set -x
+      - bucket=$(jq -r '.Parameters.pS3Bucket' buildautomation/params-master-stack.json)
+      - filetocreate=$(jq -r '.Parameters.pS3Key' buildautomation/params-master-stack.json)
+      - filetosend=$(basename $filetocreate)
+      - aws s3 cp lambda/$filetosend s3://$bucket/$filetocreate
+      - filetocreate=$(jq -r '.Parameters.pS3SfnKey' buildautomation/params-master-stack.json)
+      - filetosend=$(basename $filetocreate)
+      - aws s3 cp sfn/$filetosend s3://$bucket/$filetocreate
+      - aws sts get-caller-identity > account_info.json
+      - aws_account=$(jq -r '.Account' account_info.json)
+      - sed -i "s/{AWS_Master_Account}/$aws_account/g" buildautomation/params-child-stack.json
+      - cat buildautomation/params-child-stack.json
+
+artifacts:
+  files:
+    - buildautomation/params-child-stack.json
