@@ -1,0 +1,144 @@
+#===============================================================================
+# Deploy resources in child account to stop public instances (EC2, RDS)
+#
+# (c) Enquizit, Inc 2021
+# v1.1 2021-03-16
+#================================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy AWS EC2 Event rule and PutEvents to EventBus in central account
+
+#==================================================
+# Parameters
+#==================================================
+Parameters:
+
+  pEventBusName:
+    Description: Name of Event Bus in master Account
+    Type: String
+
+  pMasterAccountId:
+    Description: Account ID for master account
+    Type: String
+
+  pCrossAccountRoleName:
+    Description: Name for Cross Account Role
+    Type: String
+    Default: HUITPublicResourceCompliance
+
+#==================================================
+# Resources
+#==================================================
+Resources:    
+
+  rEC2EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Send event to master account anytime an EC2 instance changes to running state
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:events:us-east-1:${pMasterAccountId}:event-bus/${pEventBusName}
+          RoleArn: !GetAtt 
+            - rEventRole
+            - Arn
+          Id: Custom
+
+  rRDSEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Send event to master account anytime a new RDS instance is created/started
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Instance Event
+        detail:  
+          EventID: 
+            - RDS-EVENT-0005  # Created
+            - RDS-EVENT-0088  # Started
+            - RDS-EVENT-0154  # Started due to exceeding allowed time to be stopped
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: !Sub arn:aws:events:us-east-1:${pMasterAccountId}:event-bus/${pEventBusName}
+          RoleArn: !GetAtt 
+            - rEventRole
+            - Arn
+          Id: "EventV1"            
+
+  rRDSVPCMoveEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Send event to master account anytime a new RDS instance is moved
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Instance Event
+        detail:  
+          Message: 
+          - Finished moving DB instance to target VPC
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: !Sub arn:aws:events:us-east-1:${pMasterAccountId}:event-bus/${pEventBusName}
+          RoleArn: !GetAtt 
+            - rEventRole
+            - Arn
+          Id: "EventV2"    
+
+  rEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EventPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub arn:aws:events:us-east-1:${pMasterAccountId}:event-bus/${pEventBusName}
+
+  rCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${pCrossAccountRoleName}-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+              - !Sub arn:aws:iam::${pMasterAccountId}:root
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EventPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:*
+                  - rds:*
+                Resource: "*"

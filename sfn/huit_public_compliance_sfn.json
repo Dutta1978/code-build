@@ -1,0 +1,32 @@
+{
+  "Comment": "Check dbstatus",
+  "StartAt": "Wait",
+  "States": {
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "Stop Instance"
+    },
+    "Stop Instance": {
+      "Type": "Task",
+      "Resource": "${LambdaArn}",
+      "ResultPath": "$.InstanceState",
+      "Next": "Is Instance Stopped"
+    },
+    "Is Instance Stopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.InstanceState.InstanceStopped",
+          "BooleanEquals": true,
+          "Next": "Done"
+        }
+      ],
+      "Default": "Wait"
+    },
+    "Done": {
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}

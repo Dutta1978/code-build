@@ -1,0 +1,703 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Automatically builds and tests public instance compliance stack
+
+Parameters:
+
+  ApplicationName:
+    Description: Name of application being built
+    Type: String
+    Default: huit-public-instance-compliance-dev
+        
+  GitHubRepositoryUrl:
+    Description: URL of the repository
+    Type: String
+    Default: https://github.huit.harvard.edu/HUIT/hcdo-cto-aws-CS2-compliance
+
+  GitHubBranch:
+    Description: Branch where code to be tested lives
+    Type: String
+    Default: development
+
+  ChildStackSetName: 
+    Description: Name of stackset (for child account)
+    Type: String
+    Default: huit-build-test-public-compliance-child-account
+
+  ChildAccountNumber:
+    Description: Account where stackset instance is deployed
+    Type: String
+    Default: 849504049998
+
+  MasterStackName:
+    Description: Name for master account stack
+    Type: String
+    Default: huit-build-test-public-compliance-master-account
+
+  PublicSubnetId:
+    Description: ID of PUBLIC subnet to use for testing
+    Type: String
+    Default: subnet-02087c37e96804c25
+
+  PrivateDBSubnetGroup:
+    Description: DB Subnet Group Name of PRIVATE subnet to use for testing
+    Type: String
+    Default: private-subnet-group
+
+  PublicDBSubnetGroup:
+    Description: DB Subnet Group Name of PUBLIC subnet to use for testing
+    Type: String
+    Default: public-subnet-group
+
+  PrivateSubnetId:
+    Description: ID of PRIVATE subnet to use for testing
+    Type: String
+    Default: subnet-025f67ab9305bac40
+
+  MasterTemplateName:
+    Description: Name of CloudFormation template for master account
+    Type: String
+    Default: huit-public-resources-master-account.yml
+
+  ChildTemplateName:
+    Description: Name of CloudFormation template for child account
+    Type: String
+    Default: huit-public-resources-child-account.yml
+
+  S3RepoBucket:
+    Description: Name of S3 Bucket where GitHub code is copied
+    Type: String
+    Default: cloudarchsrvs-code-repo
+
+  S3RepoPath:
+    Description: Path to zip file (e.g. mypath/v1/)
+    Type: String
+    Default: public-compliance/source/
+
+  S3RepoFile:
+    Description: Name of file containing code
+    Type: String
+    Default: gitsource.zip
+
+  VpcId:
+    Description: VPC where CodeBuild is deployed to accesss github.huit.harvard.edu
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-090647b5dcc6e152e
+
+  SubnetIds:
+    Description: Subnet IDs where CodeBuild is deployed
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-0fa95ff21d7dd5ab0
+
+  SecurityGroupdIds:
+    Description: Security Group IDs to be used for CodeBuild
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: 'sg-040761424b761f879'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Pipeline Configuration
+        Parameters:
+          - ApplicationName
+          - MasterStackName
+          - MasterTemplateName
+          - ChildAccountNumber
+          - ChildStackSetName
+          - ChildTemplateName
+          - S3RepoBucket
+          - S3RepoPath
+          - S3RepoFile
+          - VpcId
+          - SubnetIds
+          - SecurityGroupdIds
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubRepository
+          - GitHubUser
+          - GitHubBranch
+          - GitHubOAuthToken
+          - GitHubRepositoryUrl
+      - Label:
+          default: Testing Confiugration
+        Parameters:
+          - PublicSubnetId
+          - PrivateSubnetId
+          - PublicDBSubnetGroup
+          - PrivateDBSubnetGroup
+
+
+    ParameterLabels:
+      ApplicationName: 
+        default: Application Name
+      ChildStackSetName: 
+        default: Child StackSet Name
+      MasterStackName:
+        default: Master Stack Name
+      ChildAccountNumber: 
+        default: Child Account Number
+      GitHubRepository: 
+        default: GitHub Repository
+      GitHubUser: 
+        default: GitHub User
+      GitHubBranch: 
+        default: GitHub Branch
+      GitHubOAuthToken: 
+        default: GitHub OAuth Token
+      GitHubRepositoryUrl:
+        default: GitHub Repo URL
+      PublicSubnetId:
+        default: Public Subnet Id
+      PrivateSubnetId:
+        default: Private Subnet Id
+      PublicDBSubnetGroup:
+        default: Public DB Subnet Group
+      PrivateDBSubnetGroup:
+        default: Public DB Subnet Group
+      MasterTemplateName:
+        default: Master Template Name
+      ChildTemplateName:
+        default: Child Template Name
+      S3RepoBucket:
+        default: S3 Repo Bucket
+      S3RepoPath:
+        default: S3 Repo Path
+      S3RepoFile:
+        default: S3 Repo File
+      VpcId:
+        default: VPC ID
+      SubnetIds:
+        default: Subnet ID(s)
+      SecurityGroupdIds:
+        default: Security Group ID(s)
+
+Resources:
+  
+  # Cannot reliably get GitHub to trigger CodePipeline on a Pull Request
+  # GH will work with CodeBuild; so this CodeBuild project will
+  # in turn trigger the CodePipeline
+  #
+  # Cannot create Trigger with GitHub enterprise via CodeBuild::Project
+  # - need to use console, or
+  # - possibly a custom resource in CFT
+  CodeBuildTrigger:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ApplicationName}-build-trigger
+      Description: Build project to get source and trigger CodePipeline
+      ServiceRole: !Ref CodePipelineTriggerRole
+      Artifacts:
+        Type: S3
+        Location: !Ref S3RepoBucket
+        Path: !Ref S3RepoPath
+        Name: !Ref S3RepoFile
+        Packaging: ZIP
+        EncryptionDisabled: True
+      Source:
+        Type: GITHUB_ENTERPRISE
+        BuildSpec: buildautomation/buildspec-git-to-s3.yml
+        Location: !Ref GitHubRepositoryUrl
+      SourceVersion: !Ref GitHubBranch
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds: !Ref SecurityGroupdIds 
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Type: LINUX_CONTAINER
+
+
+
+  # Pipeline which will implement the following:
+  # - download stacks to be tested & smoke test code
+  # - upload lambda code (for master stack) to s3 and update
+  #     child params with master account number
+  # - deploy stack in master account
+  # - deploy stack instance in child account
+  # - run the smoke tests
+  # - delete the stack instance
+  # - delete the master stack
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${ApplicationName}-pipeline
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      RestartExecutionOnUpdate: False
+      ArtifactStore: 
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: GetSourceCode
+          Actions:
+            - Name: SourceCode
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: S3
+              OutputArtifacts:
+                -  Name: aSource
+              Configuration:
+                PollForSourceChanges: False
+                S3Bucket: cloudarchsrvs-code-repo
+                S3ObjectKey: public-compliance/source/gitsource.zip
+        - Name: PreProcess
+          Actions:
+            - Name: PreProcess
+              InputArtifacts:
+                - Name: aSource
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: aProcess
+              Configuration: 
+                ProjectName: !Ref CodeBuildPreProcess
+              RunOrder: 1
+        - Name: BuildMasterAccountStack
+          Actions:
+            - Name: BuildStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation  
+              InputArtifacts:
+                - Name: aSource
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !Sub ${CodePipelineCloudFormationRole.Arn}
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                StackName: !Ref MasterStackName
+                TemplatePath: !Sub aSource::cft/${MasterTemplateName}
+                TemplateConfiguration: aSource::buildautomation/params-master-stack.json
+              RunOrder: 2                
+        - Name: CreateChildStacksetInstance
+          Actions:
+            - Name: BuildStackset
+              InputArtifacts:
+                - Name: aSource
+                - Name: aProcess
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormationStackSet
+              Configuration: 
+                StackSetName: !Ref ChildStackSetName
+                TemplatePath: !Sub aSource::cft/${ChildTemplateName}
+                DeploymentTargets: !Ref ChildAccountNumber
+                Regions: us-east-1
+                PermissionModel: SELF_MANAGED
+                Capabilities: 'CAPABILITY_IAM,CAPABILITY_NAMED_IAM'
+                AdministrationRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/AWSCloudFormationStackSetAdministrationRole
+                ExecutionRoleName: AWSCloudFormationStackSetExecutionRole 
+                Parameters: aProcess::buildautomation/params-child-stack.json                                 
+        - Name: ValidateTestStack
+          Actions:
+            - Name: SmokeTests
+              InputArtifacts:
+                - Name: aSource
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: Built-Smoke
+              Configuration: 
+                ProjectName: !Ref CodeBuildSmokeTests
+        - Name: DeleteTemporaryStacks
+          Actions:
+            - Name: DeleteMasterStack
+              InputArtifacts:
+                - Name: aSource
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration: 
+                ActionMode: DELETE_ONLY
+                RoleArn: !Sub "${CodePipelineCloudFormationRole.Arn}"
+                StackName: !Ref MasterStackName
+            - Name: DeleteChildStack
+              InputArtifacts:
+                - Name: aSource
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration: 
+                ProjectName: !Ref CodeBuildDeleteStacks
+
+  # EventBridge rule to trigger codepipeline
+  CodePipelineTriggerEvent:
+    Type: AWS::Events::Rule
+    Properties: 
+      Name: !Sub ${ApplicationName}-s3-event-rule
+      Description: Trigger CodePipeline for Public Instance Validation
+      EventPattern:
+        source:
+        - aws.s3
+        detail-type:
+        - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+          - s3.amazonaws.com
+          eventName:
+          - PutObject
+          - CompleteMultipartUpload
+          - CopyObject
+          requestParameters:
+            bucketName:
+            - !Ref S3RepoBucket
+            key:
+            - !Sub ${S3RepoPath}${S3RepoFile}
+      Targets: 
+        - Id: s3-codepipeline-1
+          Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          RoleArn: !Sub ${EventBridgeRole.Arn}
+
+  # CodeBuild project to delete stackset instance
+  # Needs to be scripted since not supported by CodePipeline
+  CodeBuildDeleteStacks:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ApplicationName}-delete-stack-instance
+      Description: Delete Stack Instance
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildautomation/buildspec-delete-stackset.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: StackSetName
+            Value: !Ref ChildStackSetName
+          - Name: ChildAccountNumber
+            Value: !Ref ChildAccountNumber
+      Artifacts:
+        Name: DeleteArtifacts
+        Type: CODEPIPELINE                                
+
+  # CodeBuild project that runs the smoke tests
+  CodeBuildSmokeTests:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ApplicationName}-smoke-tests
+      Description: Smoke tests for HUIT public instance compliance stack
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildautomation/buildspec-smoke-tests.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: StackSetName
+            Value: !Ref ChildStackSetName
+          - Name: ChildAccountNumber
+            Value: !Ref ChildAccountNumber
+          - Name: public_subnet_id
+            Value: !Ref PublicSubnetId
+          - Name: private_subnet_id
+            Value: !Ref PrivateSubnetId
+          - Name: private_db_subnet_group
+            Value: !Ref PrivateDBSubnetGroup
+          - Name: public_db_subnet_group
+            Value: !Ref PublicDBSubnetGroup        
+      Artifacts:
+        Type: CODEPIPELINE
+
+  # CodeBuild project uploads zip file to S3 and update master account number
+  CodeBuildPreProcess:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ApplicationName}-preprocess
+      Description: Upload lambda code required for stack and update master account
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildautomation/buildspec-preprocess.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Type: LINUX_CONTAINER
+      Artifacts:
+        Type: CODEPIPELINE
+
+  ### All of the roles needed by the projects ###
+        
+  # CodePipeline role
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Path: /
+      RoleName: !Sub "${ApplicationName}-codepipeline-${AWS::Region}"
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies: 
+        - PolicyName: !Sub "${ApplicationName}-codepipeline-${AWS::Region}"
+          PolicyDocument: 
+            Statement:
+              - Effect: Allow
+                Action:
+                - sts:AssumeRole
+                Resource:
+                - "*"
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                  - kms:GenerateDataKey
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "codedeploy:CreateDeployment"
+                  - "codedeploy:GetApplicationRevision"
+                  - "codedeploy:GetDeployment"
+                  - "codedeploy:GetDeploymentConfig"
+                  - "codedeploy:RegisterApplicationRevision"
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                  - "iam:PassRole"
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:SetStackPolicy"
+                  - "cloudformation:ValidateTemplate"
+                  - "cloudformation:ListStackSetOperationResults"
+                  - "cloudformation:ListStackSetOperations"
+                  - "cloudformation:ListStackSets"
+                  - "cloudformation:DescribeStackSet"
+                  - "cloudformation:DescribeStackSetOperation"
+                  - "cloudformation:CreateStackSet"
+                  - "cloudformation:DeleteStackSet"
+                  - "cloudformation:StopStackSetOperation"
+                  - "cloudformation:UpdateStackSet"
+                  - "cloudformation:CreateStackInstances"
+                  - "cloudformation:DeleteStackInstances"
+                  - "cloudformation:DescribeStackInstance"
+                  - "cloudformation:ListStackInstances"
+                  - "cloudformation:UpdateStackInstances"                  
+
+  # CloudFormation role used by CodePipeline
+  CodePipelineCloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Path: /
+      RoleName: !Sub "${ApplicationName}-cfn-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "cloudformation.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${ApplicationName}-cfn-${AWS::Region}"
+          PolicyDocument:
+            Statement:
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "*"
+
+  # Role used by CodeBuild projects
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Path: /
+      RoleName: !Sub "${ApplicationName}-codebuild-${AWS::Region}"
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess               
+      Policies: 
+        - PolicyName: !Sub "${ApplicationName}-codebuild-${AWS::Region}"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                - sts:AssumeRole
+                - sts:GetCallerIdentity
+                Resource:
+                - "*"
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                  - kms:GenerateDataKey
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "codedeploy:CreateDeployment"
+                  - "codedeploy:GetApplicationRevision"
+                  - "codedeploy:GetDeployment"
+                  - "codedeploy:GetDeploymentConfig"
+                  - "codedeploy:RegisterApplicationRevision"
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                  - "codebuild:*"
+                  - "iam:PassRole"
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "cloudformation:CreateStack"
+                  - "cloudformation:DeleteStack"
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:UpdateStack"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:SetStackPolicy"
+                  - "cloudformation:ValidateTemplate"
+                  - "cloudformation:ListStackSetOperationResults"
+                  - "cloudformation:ListStackSetOperations"
+                  - "cloudformation:ListStackSets"
+                  - "cloudformation:DescribeStackSet"
+                  - "cloudformation:DescribeStackSetOperation"
+                  - "cloudformation:CreateStackSet"
+                  - "cloudformation:DeleteStackSet"
+                  - "cloudformation:StopStackSetOperation"
+                  - "cloudformation:UpdateStackSet"
+                  - "cloudformation:CreateStackInstances"
+                  - "cloudformation:DeleteStackInstances"
+                  - "cloudformation:DescribeStackInstance"
+                  - "cloudformation:ListStackInstances"
+                  - "cloudformation:UpdateStackInstances"                  
+
+  # Role used by codebuild trigger project
+  CodePipelineTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Build-Trigger
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+              - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineExecutionRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - codepipeline:StartPipelineExecution
+        - PolicyName: CodeBuildTriggerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CWLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DeleteLogGroup
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Sid: VPC
+                Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: '*'
+              - Sid: S3
+                Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                  - kms:GenerateDataKey                  
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Path: /
+      RoleName: !Sub "${ApplicationName}-eventbridge-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${ApplicationName}-cfn-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - codepipeline:StartPipelineExecution
+              Resource:
+              - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+
+  # S3 bucket for build artifacts
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${ApplicationName}-build-artifacts
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+
+
