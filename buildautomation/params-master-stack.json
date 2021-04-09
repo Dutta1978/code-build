@@ -5,7 +5,7 @@
 	  "pLogLevel" : "INFO",
 	  "pOrgId" : "o-zjyrkz1048",
 	  "pROLENAME" : "HUITPublicResourceCompliance",
-	  "pS3Bucket" : "cloudarchsrvs-code-repo",
+	  "pS3Bucket" : "sh-197778-build-artifacts",
 	  "pS3Key" : "public-compliance/deployment/v2.0/huit_public_compliance.zip",
 	  "pS3SfnKey": "public-compliance/deployment/v2.0/huit_public_compliance_sfn.json",
 	  "pSNSTopicArn" : "arn:aws:sns:us-east-1:483623273785:huit-public-instance-compliance",
