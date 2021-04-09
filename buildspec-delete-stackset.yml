@@ -1,9 +1,0 @@
-version: 0.2
-phases:
-  install:
-    commands:
-      - pip install boto3
-  build:
-    commands:
-      - echo "Deleting stackset..."
-      - python buildautomation/huit_delete_temp_stackset.py
