@@ -1,0 +1,399 @@
+#===============================================================================
+# Deploy resources in master account to stop public instances (EC2, RDS)
+#
+# (c) Enquizit, Inc 2021
+# v1.1 2021-03-16
+#================================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create resources to detect, tag and stop instances (EC2,RDS) in public subnets
+
+#==================================================
+# Setup the UI if the console is being used
+#==================================================
+Metadata:
+
+  AWS::CloudFormation::Interface:
+
+    ParameterGroups:
+    - Label:
+        default: Compliance
+      Parameters:
+      - pComplianceMode
+    - Label:
+        default: Log Level
+      Parameters:
+      - pLogLevel
+    - Label:
+        default: Account Information
+      Parameters:
+      - pROLENAME
+      - pOrgId
+    - Label:
+        default: DynamoDB
+      Parameters:
+      - pTableName         
+    - Label:
+        default: Notifications
+      Parameters:
+      - pSendToSlack
+      - pSlackURL
+      - pSendToSns
+      - pSNSTopicArn
+    - Label:
+        default: Code
+      Parameters:
+      - pS3Bucket
+      - pS3Key
+    
+
+    ParameterLabels:
+      pComplianceMode:
+        default: Compliance mode for Lambda
+      pLogLevel:
+        default: Log level for Lambda
+      pROLENAME:
+        default: Cross account role that Lambda will assume
+      pOrgId:
+        default: Organization
+      pTableName:
+        default: Table Name for DynamoDB
+      pSendToSlack:
+        default: Send notifications to Slack?
+      pSlackURL:
+        default: Slack URL
+      pSendToSns:
+        default: Send notifications to SNS?
+      pSNSTopicArn:
+        default: SNS Topic ARN
+      pS3Bucket:
+        default: S3 Bucket
+      pS3Key:
+        default: S3 Key
+
+
+
+#==================================================
+# Parameters
+#==================================================
+Parameters:       
+
+  pComplianceMode:
+    Description: If true, instances will be stopped. If false, public resources will only be logged.
+    Type: String
+    Default: true
+    AllowedValues: [true, false]
+
+  pLogLevel:
+    Description: Desired log level for Lambda.
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - CRITICAL
+
+  pTableName:
+    Description: Table Name for DynamoDB
+    Type: String
+    Default: HUITPublicResourceCheck        
+
+  pROLENAME:
+    Description: The role that Lambda will assume to tag or stop resources. Must exist in child accounts.
+    Type: String
+    Default: HUITPublicResourceCompliance
+
+  pOrgId:
+    Description: Organization Id found in AWS Organizations console
+    Type: String
+
+  pSendToSlack:
+    Description: Send audit and compliance messages to Slack channel
+    Type: String
+    Default: True
+    AllowedValues:
+    - True
+    - False
+
+  pSlackURL:
+    Description: Slack URL
+    Type: String
+
+  pSendToSns:
+    Description: Send audit and compliance messages to Slack channel
+    Type: String
+    Default: True
+    AllowedValues:
+    - True
+    - False
+
+  pSNSTopicArn:
+    Description: SNS Topic Arn
+    Type: String
+
+  pS3Bucket:
+    Description: S3 Bucket where code is located
+    Type: String
+
+  pS3Key:
+    Description: Name of zip file in which code is stored
+    Type: String
+    Default: huit_public_compliance.zip
+
+  pS3SfnKey:
+    Description: Name of file containing step function definition
+    Type: String
+    Default: huit_public_compliance_sfn.json
+
+  pExceptionTag:
+    Description: Exception tag key to prevent instances from being stopped
+    Type: String
+
+
+#==================================================
+# Resources
+#==================================================
+Resources:
+
+  rCustomEventBus:    
+    Type: AWS::Events::EventBus
+    Properties: 
+        Name: HUITEventBus 
+
+
+  rEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    DependsOn: rCustomEventBus
+    Properties:
+        EventBusName: HUITEventBus
+        StatementId: "PolicyforCustomEventBus"
+        Principal: "*"
+        Action: events:PutEvents
+        Condition:              
+          Key: aws:PrincipalOrgID
+          Type: StringEquals
+          Value: !Ref pOrgId
+
+  rEC2EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger a Lambda function anytime an EC2 instance changes to running state
+      EventBusName: !Ref rCustomEventBus
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running  
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt rCFAutoStop.Arn
+          Id: Lambda
+
+  rPermissionForEventsToInvokeLambdaEC2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref rCFAutoStop
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt rEC2EventRule.Arn
+
+  rRDSEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Trigger a Lambda function anytime a new RDS instance is created/started
+      EventBusName: !Ref rCustomEventBus      
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Instance Event
+        detail:  
+          EventID: 
+            - RDS-EVENT-0005  # Created
+            - RDS-EVENT-0088  # Started
+            - RDS-EVENT-0154  # Started due to exceeding allowed time to be stopped
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt rCFAutoStop.Arn
+          Id: LambdaV1
+
+  rRDSVPCMoveEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Trigger a Lambda function anytime a new RDS instance is moved
+      EventBusName: !Ref rCustomEventBus      
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Instance Event
+        detail:  
+          Message: 
+          - Finished moving DB instance to target VPC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt rCFAutoStop.Arn
+          Id: LambdaV2
+
+  rPermissionForEventsToInvokeLambdaRDS: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref rCFAutoStop
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt rRDSEventRule.Arn            
+
+  rCFAutoStop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: huit_public_instance_compliance
+      Handler: huit_public_compliance.lambda_handler
+      Runtime: python3.8
+      Timeout: 300       
+      Environment:
+        Variables:
+          ComplianceMode: !Ref pComplianceMode
+          LogLevel: !Ref pLogLevel
+          RoleName: !Sub ${pROLENAME}-${AWS::Region}
+          SendToSlack: !Ref pSendToSlack
+          SendToSNS: !Ref pSendToSns
+          SlackURL: !Ref pSlackURL
+          Topic: !Ref pSNSTopicArn
+          ExceptionTag: !Ref pExceptionTag
+          DynamoTable: !Ref pTableName
+          StepFunctionArn: !GetAtt rStateMachine.Arn
+      Role: !GetAtt rLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref pS3Bucket
+        S3Key: !Ref pS3Key
+
+  rLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamo
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt rDynamoDBTable.Arn
+        - PolicyName: LambdaEC2
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:StopInstances
+                  - ec2:DescribeRouteTables
+                Resource: '*'
+        - PolicyName: LambdaRDS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:AddTagsToResource
+                  - rds:DescribeDBInstances
+                  - rds:StopDBInstance
+                  - states:StartExecution
+                Resource: '*'                                
+        - PolicyName: LambdaAssumeRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: "*" 
+        - PolicyName: LambdaSNS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'                                          
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  rDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    # DeletionPolicy: Retain
+    # UpdateReplacePolicy: Retain
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: AccountId
+        AttributeType: S
+      - AttributeName: DateTime
+        AttributeType: S       
+      KeySchema:
+      - AttributeName: AccountId
+        KeyType: HASH
+      - AttributeName: DateTime
+        KeyType: RANGE        
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 10
+      TableName: !Ref pTableName
+
+
+  rStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+              - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - 
+              Effect: Allow
+              Action:
+              - lambda:InvokeFunction
+              Resource: '*'      
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # This is not ideal, but state machine refers to Lambda and Lambda to state machine
+  # so, need to hardcode the Lambda ARN here
+  rStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: huit_public_instance_compliance
+      RoleArn: !GetAtt rStateMachineRole.Arn
+      DefinitionS3Location:
+        Bucket: !Ref pS3Bucket
+        Key: !Ref pS3SfnKey
+      DefinitionSubstitutions:
+        LambdaArn: !Sub arn:aws:lambda:us-east-1:${AWS::AccountId}:function:huit_public_instance_compliance
