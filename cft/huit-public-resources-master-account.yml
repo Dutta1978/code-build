@@ -253,7 +253,7 @@ Resources:
       FunctionName: huit_public_instance_compliance
       Handler: huit_public_compliance.lambda_handler
       Runtime: python3.8
-      Timeout: 300       
+      Timeout: 200       
       Environment:
         Variables:
           ComplianceMode: !Ref pComplianceMode
