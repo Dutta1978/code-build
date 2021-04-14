@@ -72,7 +72,7 @@ Resources:
           RoleArn: !GetAtt 
             - rEventRole
             - Arn
-          Id: "EventV1"            
+          Id: "EventV2"            
 
   rRDSVPCMoveEventRule:
     Type: AWS::Events::Rule
